@@ -127,12 +127,12 @@ class Batch_Balanced_Dataset(object):
 
         for i, data_loader_iter in enumerate(self.dataloader_iter_list):
             try:
-                image, label = data_loader_iter.next()
+                image, label = next(data_loader_iter)
                 balanced_batch_images.append(image)
                 balanced_batch_labels += label
             except StopIteration:
                 self.dataloader_iter_list[i] = iter(self.data_loader_list[i])
-                image, label = self.dataloader_iter_list[i].next()
+                image, label = next(self.dataloader_iter_list[i])
                 balanced_batch_images.append(image)
                 balanced_batch_labels += label
             except ValueError:
@@ -149,13 +149,13 @@ class Batch_Balanced_Dataset(object):
 
         for i, data_loader_iter in enumerate(self.dataloader_iter_list):
             try:
-                image, image_ema, text = data_loader_iter.next()
+                image, image_ema, text = next(data_loader_iter)
                 balanced_batch_images.append(image)
                 balanced_batch_images_ema.append(image_ema)
                 balanced_batch_texts += text
             except StopIteration:
                 self.dataloader_iter_list[i] = iter(self.data_loader_list[i])
-                image, image_ema, text = self.dataloader_iter_list[i].next()
+                image, image_ema, text = next(self.dataloader_iter_list[i])
                 balanced_batch_images.append(image)
                 balanced_batch_images_ema.append(image_ema)
                 balanced_batch_texts += text
@@ -177,12 +177,12 @@ class Batch_Balanced_Dataset(object):
 
         for i, data_loader_iter in enumerate(self.dataloader_iter_list):
             try:
-                image_aug1, image_aug2 = data_loader_iter.next()
+                image_aug1, image_aug2 = next(data_loader_iter)
                 balanced_batch_img1.append(image_aug1)
                 balanced_batch_img2.append(image_aug2)
             except StopIteration:
                 self.dataloader_iter_list[i] = iter(self.data_loader_list[i])
-                image_aug1, image_aug2 = self.dataloader_iter_list[i].next()
+                image_aug1, image_aug2 = next(self.dataloader_iter_list[i])
                 balanced_batch_img1.append(image_aug1)
                 balanced_batch_img2.append(image_aug2)
             except ValueError:

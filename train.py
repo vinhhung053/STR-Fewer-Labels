@@ -471,7 +471,7 @@ if __name__ == "__main__":
         help="path to validation dataset",
     )
     parser.add_argument(
-        "--workers", type=int, default=4, help="number of data loading workers"
+        "--workers", type=int, default=2, help="number of data loading workers"
     )
     parser.add_argument("--batch_size", type=int, default=128, help="input batch size")
     parser.add_argument(
