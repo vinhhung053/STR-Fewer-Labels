@@ -97,7 +97,8 @@ def train(opt, log):
     )
 
     if opt.semi != "None":
-        select_data_unlabel = ["U1.Book32", "U2.TextVQA", "U3.STVQA"]
+        select_data_unlabel = [opt.semi_data]
+        #select_data_unlabel = ["U1.Book32", "U2.TextVQA", "U3.STVQA"]
         batch_ratio_unlabel = [round(1 / len(select_data_unlabel), 3)] * len(
             select_data_unlabel
         )
@@ -623,6 +624,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--saved_model", default="", help="path to model to continue training"
+    )
+    parser.add_argument(
+        "--semi_data", default="U3.STVQA", help="select data for seft-training |"
     )
 
     opt = parser.parse_args()

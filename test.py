@@ -347,7 +347,7 @@ if __name__ == "__main__":
         help="evaluate 6 benchmark evaluation datasets or 7 additionally collected evaluation datasets |benchmark|addition|",
     )
     parser.add_argument(
-        "--workers", type=int, help="number of data loading workers", default=4
+        "--workers", type=int, help="number of data loading workers", default=2
     )
     parser.add_argument("--batch_size", type=int, default=512, help="input batch size")
     parser.add_argument(
