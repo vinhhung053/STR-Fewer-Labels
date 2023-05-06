@@ -15,6 +15,37 @@ from torch.utils.data import Dataset, ConcatDataset, Subset
 from torch._utils import _accumulate
 import torchvision.transforms as transforms
 
+class Gradual_Dataset(object):
+    def __init__(
+        self, opt, dataset_root, select_data, log
+    ):
+        self.opt = opt
+        dashed_line = "-" * 80
+        print(dashed_line)
+
+        self._AlignCollate = AlignCollate_SemiSL(self.opt)
+        data_type = "unlabel"
+
+        self._dataset, _dataset_log = hierarchical_dataset(
+                root=dataset_root,
+                opt=self.opt,
+                select_data=select_data,
+                data_type=data_type,
+            )
+        
+    def get_dataloader(self, subset, batch_size, shuffle = True):
+        dataset_subset = Subset(self._dataset, subset)
+        data_loader = torch.utils.data.DataLoader(
+                dataset_subset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=int(self.opt.workers),
+                collate_fn=self._AlignCollate,
+                pin_memory=False,
+                drop_last=False,
+            )
+        return data_loader
+        
 
 class Batch_Balanced_Dataset(object):
     def __init__(
@@ -200,6 +231,7 @@ def hierarchical_dataset(root, opt, select_data="/", data_type="label", mode="tr
     dataset_log = f"dataset_root:    {root}\t dataset: {select_data[0]}"
     print(dataset_log)
     dataset_log += "\n"
+    count_index = 0
     for dirpath, dirnames, filenames in os.walk(root + "/"):
         if not dirnames:
             select_flag = False
@@ -212,7 +244,8 @@ def hierarchical_dataset(root, opt, select_data="/", data_type="label", mode="tr
                 if data_type == "label":
                     dataset = LmdbDataset(dirpath, opt, mode=mode)
                 else:
-                    dataset = LmdbDataset_unlabel(dirpath, opt)
+                    dataset = LmdbDataset_unlabel(dirpath, opt, count_index)
+                    count_index = dataset[-1][1] + 1 # chuẩn hóa index
                 sub_dataset_log = f"sub-directory:\t/{os.path.relpath(dirpath, root)}\t num samples: {len(dataset)}"
                 print(sub_dataset_log)
                 dataset_log += f"{sub_dataset_log}\n"
@@ -287,8 +320,9 @@ class LmdbDataset(Dataset):
 
 
 class LmdbDataset_unlabel(Dataset):
-    def __init__(self, root, opt):
+    def __init__(self, root, opt, count_index):
 
+        self.count_index = count_index #index đúng khi concate các tập dữ liệu
         self.root = root
         self.opt = opt
         self.env = lmdb.open(
@@ -327,9 +361,9 @@ class LmdbDataset_unlabel(Dataset):
             except IOError:
                 print(f"Corrupted image for {img_key}")
                 # make dummy image for corrupted image.
-                img = PIL.Image.new("RGB", (opt.imgW, opt.imgH))
+                img = PIL.Image.new("RGB", (self.opt.imgW, self.opt.imgH))
 
-        return img
+        return img, index - 1 + self.count_index
 
 
 class RawDataset(Dataset):
@@ -415,10 +449,11 @@ class AlignCollate_SemiSL(object):
             return student_tensors, teacher_tensors
 
         else:
-            image_tensors = [self.transform(image) for image in batch]
+            images, indexs = zip(*batch)
+            image_tensors = [self.transform(image) for image in images]
             image_tensors = torch.cat([t.unsqueeze(0) for t in image_tensors], 0)
-
-            return image_tensors, image_tensors
+                
+            return image_tensors, indexs
 
 
 class AlignCollate_SelfSL(object):
