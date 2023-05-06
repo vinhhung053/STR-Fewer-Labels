@@ -47,7 +47,7 @@ def select_intermediate_domain(model, unlabel_data, adapted_path, remain_path, d
 
     unlabel_loader_remain = unlabel_data.get_dataloader(
         remain_data,
-        batch_size=64, # 1024
+        batch_size=100, # 1024
         shuffle=False
     )
 
@@ -87,16 +87,15 @@ def select_intermediate_domain(model, unlabel_data, adapted_path, remain_path, d
                 pseudo_dict[img_index] = pred
 
                 # save confidence_list
-                confidence_list.append(confidence_score.item())
+                confidence_list.append([img_index ,confidence_score.item()])
 
-    n_samples = 20
-    confidence_bound = np.partition(confidence_list, -n_samples)[::-1][n_samples-1]
+    n_samples = 100
+    confidence_bound = np.partition(np.array(confidence_list)[:, 1], -n_samples)[::-1][n_samples-1]
     if float(confidence_bound) < threshold:
         confidence_bound = threshold      # threshhold
 
-    print(confidence_bound)
     # select n data having best confidence score
-    adapting_data = {index: pseudo_dict[index] for index, conf in enumerate(confidence_list) if conf >= confidence_bound}
+    adapting_data = {index: pseudo_dict[index] for index, conf in confidence_list if conf >= confidence_bound}
     
     pseudo_data = adapted_data.copy()
     adapted_data.update(adapting_data)       # add selected data in order to save
@@ -264,15 +263,14 @@ def train(opt, log):
     
     adapted_path = 'adaptation/adapted.pkl'
     remain_path = 'adaptation/remain.pkl'
-    data_size = 1024        # total number of intermediate data
+    data_size = 1000        # total number of intermediate data
     threshold = 0.5
 
     adapted_dict, adapting_list = select_intermediate_domain(
         model, unlabel_data, adapted_path, remain_path, data_size, threshold, converter)
-    print(adapted_dict.keys())
-    print(adapting_list[0])
+    print(adapted_dict)
+    print(adapting_list)
 
-    return
     unlabel_loader_adapted = unlabel_data.get_dataloader(
         list(adapted_dict.keys()),
         batch_size=opt.batch_size,
