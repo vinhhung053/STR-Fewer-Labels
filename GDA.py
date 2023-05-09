@@ -3,7 +3,6 @@ import sys
 import time
 import random
 import argparse
-import json
 import pickle
 
 import torch
@@ -26,16 +25,16 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 """ Adaptation area """
 
-def select_intermediate_domain(model, unlabel_data, adapted_path, remain_path, data_size, threshold, converter):
-    if os.path.isfile(adapted_path):
-        with open(adapted_path, 'rb') as f:
-            adapted_data = pickle.load(f)
+def select_intermediate_domain(opt, model, unlabel_data, converter):
+    if os.path.isfile(opt.adapted_path):
+        with open(opt.adapted_path, 'rb') as f:
+            adapted_data = pickle.load(f)           # load adapted data dictionary
     else:
         adapted_data = {}
 
-    if os.path.isfile(remain_path):
-        with open(remain_path, 'rb') as f:
-            remain_data = pickle.load(f)
+    if os.path.isfile(opt.remain_path):
+        with open(opt.remain_path, 'rb') as f:
+            remain_data = pickle.load(f)            # load remain data dictionary
     else:
         remain_data = []
 
@@ -43,11 +42,11 @@ def select_intermediate_domain(model, unlabel_data, adapted_path, remain_path, d
         return adapted_data, []
     
     if (len(remain_data) == 0 and len(adapted_data) == 0):
-        remain_data = list(range(data_size))
+        remain_data = list(range(opt.data_size))
 
     unlabel_loader_remain = unlabel_data.get_dataloader(
         remain_data,
-        batch_size=100, # 1024
+        batch_size=opt.batch_size_unlabel,
         shuffle=False
     )
 
@@ -89,10 +88,9 @@ def select_intermediate_domain(model, unlabel_data, adapted_path, remain_path, d
                 # save confidence_list
                 confidence_list.append([img_index ,confidence_score.item()])
 
-    n_samples = 100
-    confidence_bound = np.partition(np.array(confidence_list)[:, 1], -n_samples)[::-1][n_samples-1]
-    if float(confidence_bound) < threshold:
-        confidence_bound = threshold      # threshhold
+    confidence_bound = np.partition(np.array(confidence_list)[:, 1], -opt.n_samples)[::-1][opt.n_samples-1]
+    if float(confidence_bound) < opt.threshold:
+        confidence_bound = opt.threshold      # threshhold
 
     # select n data having best confidence score
     adapting_data = {index: pseudo_dict[index] for index, conf in confidence_list if conf >= confidence_bound}
@@ -101,22 +99,26 @@ def select_intermediate_domain(model, unlabel_data, adapted_path, remain_path, d
     adapted_data.update(adapting_data)       # add selected data in order to save
 
     # save adapted file
-    with open(adapted_path, "wb") as f:
+    with open(opt.adapted_path, "wb") as f:
         pickle.dump(adapted_data, f)
             
     # save remain file        
     remain_data = np.setdiff1d(remain_data, list(adapting_data.keys()))
-    with open(remain_path, 'wb') as f:
+    with open(opt.remain_path, 'wb') as f:
+        pickle.dump(remain_data, f)
+
+    
+    with open(opt.remain_path, 'wb') as f:
         pickle.dump(remain_data, f)
 
     return pseudo_data, list(adapting_data.keys())
 
-    
+
 def train(opt, log):
 
     """dataset preparation"""
 
-    select_data = ["MJ", "ST"]
+    select_data = ["MJ", "ST"]          # source domain
 
     # set batch_ratio for each data.
     batch_ratio = [round(1 / len(select_data), 3)] * len(select_data)
@@ -143,8 +145,7 @@ def train(opt, log):
     #adaptation data
     select_data_unlabel = ['U2.TextVQA', "U3.STVQA"]
     # select_data_unlabel = ["U1.Book32", "U2.TextVQA", "U3.STVQA"]
-    dataset_root_unlabel = "data_CVPR2021/training/unlabel/"
-    unlabel_data = Gradual_Dataset(opt, dataset_root_unlabel, select_data_unlabel, log)
+    unlabel_data = Gradual_Dataset(opt, opt.dataset_root_unlabel, select_data_unlabel, log)
 
     log.write(valid_dataset_log)
     print("-" * 80)
@@ -247,6 +248,7 @@ def train(opt, log):
         log.write(repr(scheduler) + "\n")
 
     """ final options """
+    # print(opt)
     opt_log = "------------ Options -------------\n"
     args = vars(opt)
     for k, v in args.items():
@@ -260,16 +262,11 @@ def train(opt, log):
     log.close()
 
     """ select intermediate domain """
-    
-    adapted_path = 'adaptation/adapted.pkl'
-    remain_path = 'adaptation/remain.pkl'
-    data_size = 1000        # total number of intermediate data
-    threshold = 0.5
 
+    print("-" * 80)
+    print("select intermediate domain")
     adapted_dict, adapting_list = select_intermediate_domain(
-        model, unlabel_data, adapted_path, remain_path, data_size, threshold, converter)
-    print(adapted_dict)
-    print(adapting_list)
+        opt, model, unlabel_data, converter)
 
     unlabel_loader_adapted = unlabel_data.get_dataloader(
         list(adapted_dict.keys()),
@@ -307,7 +304,7 @@ def train(opt, log):
         image_tensors, labels = train_loader.get_batch()
 
         image = image_tensors.to(device)
-        labels_index, labels_length = converter.encode(
+        labels_index, _ = converter.encode(
             labels, batch_max_length=opt.batch_max_length
         )
 
@@ -320,9 +317,17 @@ def train(opt, log):
 
         """ loss of adapted domain """
         images_adapted, indexs_adapted = next(iter(unlabel_loader_adapted))
-        images_adapted = images_adapted.to(device)
-        labels = [adapted_list[index] for index in indexs_adapted]
+        images_adapted = images_adapted.to(device)          # đẩy dữ liệu lên device, lúc tính loss xong cần clear device ko
+        labels_adapted = [adapted_dict[index] for index in indexs_adapted]
+        labels_adpated_index, _ = converter.encode(
+            labels_adapted, batch_max_length=opt.batch_max_length
+        )
 
+        preds_adapted = model(images_adapted, labels_adpated_index[:, :-1])  # align with Attention.forward
+        target_adapted = labels_adpated_index[:, 1:]  # without [SOS] Symbol
+        loss_adapted = criterion(
+            preds_adapted.view(-1, preds_adapted.shape[-1]), target_adapted.contiguous().view(-1)
+        )
 
         """ loss of semi """
         # semi supervised part (SemiSL)
@@ -330,12 +335,12 @@ def train(opt, log):
         images_unlabel = images_unlabel.to(device)
         loss_SemiSL = criterion_SemiSL(images_unlabel, model)
 
-        loss = loss_source + loss_SemiSL
-        semi_loss_avg.add(loss_SemiSL)
-
+        loss = loss_source + loss_adapted + loss_SemiSL
+        # semi_loss_avg.add(loss_SemiSL)
 
         model.zero_grad()
         loss.backward()
+        
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), opt.grad_clip
         )  # gradient clipping with 5 (Default)
@@ -347,7 +352,6 @@ def train(opt, log):
         else:
             adjust_learning_rate(optimizer, iteration, opt)
 
-        
         # validation part.
         # To see training progress, we also conduct validation when 'iteration == 1'
         if iteration % opt.val_interval == 0 or iteration == 1:
@@ -389,7 +393,7 @@ def train(opt, log):
                 head = f'{"Ground Truth":25s} | {"Prediction":25s} | Confidence Score & T/F'
                 predicted_result_log = f"{dashed_line}\n{head}\n{dashed_line}\n"
                 for gt, pred, confidence in zip(
-                    labels[:5], preds[:5], confidence_score[:5]
+                    labels[:20], preds[:20], confidence_score[:20]
                 ):
 
                     gt = gt[: gt.find("[EOS]")]
@@ -467,7 +471,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--workers", type=int, default=2, help="number of data loading workers"
     )
-    parser.add_argument("--batch_size", type=int, default=62, help="input batch size")
+    parser.add_argument("--batch_size", type=int, default=32, help="input batch size")
     parser.add_argument(
         "--num_iter", type=int, default=1000, help="number of iterations to train for"
     )
@@ -606,13 +610,32 @@ if __name__ == "__main__":
     parser.add_argument(
         "--saved_model", default="saved_models/TRBA-Baseline-synth.pth", help="path to model to continue training"
     )
+    """ adaptation """
     parser.add_argument(
-        "--semi_data", default="U3.STVQA", help="select data for seft-training |"
+        "--dataset_root_unlabel", 
+        default="data_CVPR2021/training/unlabel/", 
+        help="path to unlabel data"
     )
+    parser.add_argument(
+        "--adapted_path", 
+        default="adaptation/adapted.pkl", 
+        help="path to adapted data dictionary"
+    )
+    parser.add_argument(
+        "--remain_path", 
+        default="adaptation/remain.pkl", 
+        help="path to remain data list"
+    )
+    parser.add_argument("--batch_size_unlabel", type=int, default=2048, help="input batch size (unlabel data)")
+    parser.add_argument("--data_size", type=int, default=2048000, help="total number of intermediate data")
+    parser.add_argument("--threshold", type=float, default=0.5, help="threshold of confidence score")
+    parser.add_argument("--n_samples", type=int, default=20480, help="n samples of each adapt step")
+    parser.add_argument("--N_gradual", type=int, default=1000, help="N gradual step")
+
 
     opt = parser.parse_args()
 
-    # model: RBA
+    # model: TRBA
     opt.Transformation = "TPS"
     opt.FeatureExtraction = "ResNet"
     opt.SequenceModeling = "BiLSTM"
