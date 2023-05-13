@@ -19,6 +19,11 @@ class Gradual_Dataset(object):
     def __init__(
         self, opt, dataset_root, select_data, log
     ):
+        """
+        Subset data for GDA (adapted data, adapting data and remain data)
+        Bach batch returns image tensor and corresponding index
+        """
+
         self.opt = opt
         dashed_line = "-" * 80
         print(dashed_line)
