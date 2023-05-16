@@ -47,7 +47,7 @@ def select_intermediate_domain(opt, model, unlabel_data, converter, flag = True)
 
     if (not flag):
         with open(opt.adapting_path, 'rb') as f:
-            adapting_data = pickle.load(f)
+                adapting_data = pickle.load(f)
         return adapted_data, adapting_data
 
     unlabel_loader_remain = unlabel_data.get_dataloader(
@@ -56,8 +56,8 @@ def select_intermediate_domain(opt, model, unlabel_data, converter, flag = True)
         shuffle=False
     )
 
-    print('Calculate confidence')
     pseudo_dict = dict()
+    overconfident_data = dict()
     confidence_list = list()
     with torch.no_grad():
         for image_tensors, index_unlabel in unlabel_loader_remain:
@@ -88,20 +88,24 @@ def select_intermediate_domain(opt, model, unlabel_data, converter, flag = True)
                 # calculate confidence score (= multiply of pred_max_prob)
                 confidence_score = pred_max_prob.cumprod(dim=0)[-1]
 
-                # save pseudo_label
-                pseudo_dict[img_index] = pred
+                # if confidence_score higher than threshold_above, we won't use them to adapt
+                if (confidence_score > opt.threshold_above):
+                    overconfident_data[img_index] = pred
+                else:
+                    # save pseudo_label
+                    pseudo_dict[img_index] = pred
 
-                # save confidence_list
-                confidence_list.append([img_index ,confidence_score.item()])
-
+                    # save confidence_list
+                    confidence_list.append([img_index ,confidence_score.item()])
 
     confidence_bound = np.partition(np.array(confidence_list)[:, 1], -opt.n_samples)[::-1][opt.n_samples-1]
-    if float(confidence_bound) < opt.threshold:
-        confidence_bound = opt.threshold      # threshhold
+    if float(confidence_bound) < opt.threshold_below:
+        confidence_bound = opt.threshold_below      # threshhold
 
     # select n data having best confidence score
     adapting_data = {index: pseudo_dict[index] for index, conf in confidence_list if conf >= confidence_bound}
     
+    adapted_data.update(overconfident_data)
     pseudo_data = adapted_data.copy()
     adapted_data.update(adapting_data)       # add selected data in order to save
 
@@ -123,7 +127,7 @@ def select_intermediate_domain(opt, model, unlabel_data, converter, flag = True)
     # unlabel_data._dataset[list(adapting_data.keys())[random_number]][0].show()
     # time.sleep(5)
 
-    return adapted_data, adapting_data
+    return pseudo_data, adapting_data
 
 
 def train(opt, log):
@@ -147,16 +151,16 @@ def train(opt, log):
 
     valid_loader = torch.utils.data.DataLoader(
         valid_dataset,
-        batch_size=opt.batch_size,
+        batch_size=opt.batch_size_unlabel,
         shuffle=True,  # 'True' to check training progress with validation function.
         num_workers=int(opt.workers),
         collate_fn=AlignCollate_valid,
         pin_memory=False,
     )
 
-    #adaptation data
-    select_data_unlabel = ['U2.TextVQA', "U3.STVQA"]
-    # select_data_unlabel = ["U1.Book32", "U2.TextVQA", "U3.STVQA"]
+    # adaptation data
+    # select_data_unlabel = ['U2.TextVQA', "U3.STVQA"]
+    select_data_unlabel = ["U1.Book32", "U2.TextVQA", "U3.STVQA"]
     unlabel_data = Gradual_Dataset(opt, opt.dataset_root_unlabel, select_data_unlabel, log)
 
     print("-" * 80)
@@ -168,6 +172,15 @@ def train(opt, log):
     opt.eos_token_index = converter.dict["[EOS]"]
     opt.num_class = len(converter.character)
 
+    if (opt.checkpoint_path != ""):
+        checkpoint = torch.load(opt.checkpoint_path)
+    else:
+        checkpoint = {
+            'iteration': 0,
+            'best_score': -1,
+            'model': torch.load(opt.saved_model, map_location=device),
+        }
+
     model = Model(opt)
 
     # data parallel for multi-GPU
@@ -176,7 +189,7 @@ def train(opt, log):
 
     fine_tuning_log = f"### loading pretrained model from {opt.saved_model}\n"
 
-    model.load_state_dict(torch.load(opt.saved_model, map_location=device))
+    model.load_state_dict(checkpoint['model'])
 
     """ setup loss """
 
@@ -185,7 +198,7 @@ def train(opt, log):
         device
     )
 
-    criterion_SemiSL = PseudoLabelLoss(opt, converter, criterion)
+    # criterion_SemiSL = PseudoLabelLoss(opt, converter, criterion)
 
     # loss averager
     train_loss_avg = Averager()
@@ -200,45 +213,6 @@ def train(opt, log):
     print(f"Trainable params num: {sum(params_num)}")
     # [print(name, p.numel()) for name, p in filter(lambda p: p[1].requires_grad, model.named_parameters())]
 
-    """ select intermediate domain """
-
-    print("-" * 80)
-    print("select intermediate domain")
-
-    adapted_dict, adapting_dict = select_intermediate_domain(
-        opt, model, unlabel_data, converter, flag = False)
-
-    # unlabel_loader_adapted = unlabel_data.get_dataloader(
-    #     list(adapted_dict.keys()),
-    #     batch_size=opt.batch_size,
-    #     shuffle=True
-    # )
-
-    unlabel_loader_adapting = unlabel_data.get_dataloader(
-        list(adapting_dict.keys()),
-        batch_size=opt.batch_size,
-        shuffle=True
-    )
-
-    # setup optimizer
-    optimizer = torch.optim.Adam(filtered_parameters, lr=opt.lr)
-    print("Optimizer:")
-    print(optimizer)
-
-    if "super" in opt.schedule:
-        cycle_momentum = False
-
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=opt.lr,
-            cycle_momentum=cycle_momentum,
-            div_factor=20,
-            final_div_factor=1000,
-            total_steps=opt.num_iter,
-        )
-        print("Scheduler:")
-        print(scheduler)
-
     """ final options """
     # print(opt)
     opt_log = "------------ Options -------------\n"
@@ -249,40 +223,91 @@ def train(opt, log):
         else:
             opt_log += f"{str(k)}: {str(v)}\n"
     opt_log += "---------------------------------------\n"
-    print(opt_log)
+    # print(opt_log)
     log.close()
 
     start_time = time.time()
-    best_score = -1
+    best_score = checkpoint['best_score']
     
     print("Start training...")
 
     """ start training """
-    start_iter = 0
-    if opt.saved_model != "":
-        try:
-            start_iter = int(opt.saved_model.split("_")[-1].split(".")[0])
-            print(f"continue to train, start_iter: {start_iter}")
-        except:
-            pass
+    start_iter = checkpoint['iteration']
+
+    """ select intermediate domain """
+
+    print("-" * 80)
+    print("select intermediate domain")
+
+    if (start_iter % opt.num_iter_GDA != 0):
+
+        # setup optimizer
+        optimizer = torch.optim.Adam(filtered_parameters, lr=opt.lr)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
+        if "super" in opt.schedule:
+            cycle_momentum = False
+
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=opt.lr,
+                cycle_momentum=cycle_momentum,
+                div_factor=20,
+                final_div_factor=1000,
+                total_steps=opt.num_iter,
+            )
+            scheduler.load_state_dict(checkpoint['scheduler'])
+    
+        adapted_dict, adapting_dict = select_intermediate_domain(
+            opt, model, unlabel_data, converter, flag = False)
+
+        unlabel_loader_adapted = unlabel_data.get_dataloader(
+            list(adapted_dict.keys()),
+            batch_size=opt.batch_size,
+            shuffle=True
+        )
+
+        unlabel_loader_adapting = unlabel_data.get_dataloader(
+            list(adapting_dict.keys()),
+            batch_size=opt.batch_size,
+            shuffle=True
+        )
 
     # training loop
     for iteration in tqdm(
         range(start_iter + 1, opt.num_iter + 1),
-        total=opt.num_iter,
+        total=opt.num_iter - start_iter,
         position=0,
         leave=True,
     ):
-        
-        if iteration % opt.num_iter_GDA == 0 or iteration == 1:
+        if (iteration - 1) % opt.num_iter_GDA == 0:
             adapted_dict, adapting_dict = select_intermediate_domain(
                 opt, model, unlabel_data, converter, flag = True)
             
-            # unlabel_loader_adapted = unlabel_data.get_dataloader(
-            #     list(adapted_dict.keys()),
-            #     batch_size=opt.batch_size,
-            #     shuffle=True
-            # )
+            if len(adapting_dict) < 300:
+                print('Early Stopping')
+                break
+
+            # setup optimizer
+            optimizer = torch.optim.Adam(filtered_parameters, lr=opt.lr)
+
+            if "super" in opt.schedule:
+                cycle_momentum = False
+
+                scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                    optimizer,
+                    max_lr=opt.lr,
+                    cycle_momentum=cycle_momentum,
+                    div_factor=20,
+                    final_div_factor=1000,
+                    total_steps=opt.num_iter,
+                )
+            
+            unlabel_loader_adapted = unlabel_data.get_dataloader(
+                list(adapted_dict.keys()),
+                batch_size=opt.batch_size,
+                shuffle=True
+            )
 
             unlabel_loader_adapting = unlabel_data.get_dataloader(
                 list(adapting_dict.keys()),
@@ -290,78 +315,10 @@ def train(opt, log):
                 shuffle=True
             )
 
-        """ loss of source domain """
-        image_tensors, labels = train_loader.get_batch()
-
-        image = image_tensors.to(device)
-        labels_index, _ = converter.encode(
-            labels, batch_max_length=opt.batch_max_length
-        )
-
-        # default recognition loss part
-        preds = model(image, labels_index[:, :-1])  # align with Attention.forward
-        target = labels_index[:, 1:]  # without [SOS] Symbol
-        loss_source = criterion(
-            preds.view(-1, preds.shape[-1]), target.contiguous().view(-1)
-        )
-
-        # """ loss of adapted domain """
-        # images_adapted, indexs_adapted = next(iter(unlabel_loader_adapted))
-        # images_adapted = images_adapted.to(device)          # đẩy dữ liệu lên device, lúc tính loss xong cần clear device ko
-        # labels_adapted = [adapted_dict[index] for index in indexs_adapted]
-        # labels_adpated_index, _ = converter.encode(
-        #     labels_adapted, batch_max_length=opt.batch_max_length
-        # )
-
-        # preds_adapted = model(images_adapted, labels_adpated_index[:, :-1])  # align with Attention.forward
-        # target_adapted = labels_adpated_index[:, 1:]  # without [SOS] Symbol
-        # loss_adapted = criterion(
-        #     preds_adapted.view(-1, preds_adapted.shape[-1]), target_adapted.contiguous().view(-1)
-        # )
-
-        # """ loss of semi """
-        # # semi supervised part (SemiSL)
-        # images_unlabel, indexs_unlabel = next(iter(unlabel_loader_adapting))
-        # images_unlabel = images_unlabel.to(device)
-        # loss_SemiSL = criterion_SemiSL(images_unlabel, model)
-
-        """ loss of semi """
-        # semi supervised part (SemiSL)
-        images_unlabel, indexs_unlabel = next(iter(unlabel_loader_adapting))
-        images_unlabel = images_unlabel.to(device)
-        labels_adapting = [adapted_dict[index] for index in indexs_unlabel]
-        labels_adpating_index, _ = converter.encode(
-            labels_adapting, batch_max_length=opt.batch_max_length
-        )
-
-        preds_adapting = model(images_unlabel, labels_adpating_index[:, :-1])  # align with Attention.forward
-        target_adapting = labels_adpating_index[:, 1:]  # without [SOS] Symbol
-        loss_SemiSL = criterion(
-            preds_adapting.view(-1, preds_adapting.shape[-1]), target_adapting.contiguous().view(-1)
-        )
-
-        # loss = loss_source + loss_adapted + loss_SemiSL
-        loss = loss_source + loss_SemiSL
-        # semi_loss_avg.add(loss_SemiSL)
-
-        model.zero_grad()
-        loss.backward()
-        
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(), opt.grad_clip
-        )  # gradient clipping with 5 (Default)
-        optimizer.step()
-        # train_loss_avg.add(loss)
-
-        if "super" in opt.schedule:
-            scheduler.step()
-        else:
-            adjust_learning_rate(optimizer, iteration, opt)
-
-        """
         # validation part.
         # To see training progress, we also conduct validation when 'iteration == 1'
-        if iteration % opt.val_interval == 0 or iteration == 1:
+        if (iteration - 1) % opt.val_interval == 0:
+
             # for validation log
             with open(f"./saved_models/{opt.exp_name}/log_train.txt", "a") as log:
                 model.eval()
@@ -386,6 +343,18 @@ def train(opt, log):
                         model.state_dict(),
                         f"./saved_models/{opt.exp_name}/best_score.pth",
                     )
+
+                # save checkpoint
+                checkpoint = {
+                    'iteration': iteration - 1,
+                    'best_score': best_score,
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': scheduler.state_dict(),
+                }
+
+                checkpoint_path = f'./checkpoint/{opt.exp_name}_checkpoint.pt'
+                torch.save(checkpoint, checkpoint_path)
 
                 # validation log: loss, lr, score (accuracy or norm ED), time.
                 lr = optimizer.param_groups[0]["lr"]
@@ -434,13 +403,74 @@ def train(opt, log):
 
                 train_loss_avg.reset()
                 semi_loss_avg.reset()
-        """
-        # train_loss_avg.reset()
-        torch.save(
-                    model.state_dict(),
-                    f"./saved_models/{opt.exp_name}/best_score.pth",
-                    )
 
+        """ loss of source domain """
+        image_tensors, labels = train_loader.get_batch()
+
+        image = image_tensors.to(device)
+        labels_index, _ = converter.encode(
+            labels, batch_max_length=opt.batch_max_length
+        )
+
+        # default recognition loss part
+        preds = model(image, labels_index[:, :-1])  # align with Attention.forward
+        target = labels_index[:, 1:]  # without [SOS] Symbol
+        loss_source = criterion(
+            preds.view(-1, preds.shape[-1]), target.contiguous().view(-1)
+        )
+
+        """ loss of adapted domain """
+        images_adapted, indexs_adapted = next(iter(unlabel_loader_adapted))
+        images_adapted = images_adapted.to(device)          
+        labels_adapted = [adapted_dict[index] for index in indexs_adapted]
+        labels_adpated_index, _ = converter.encode(
+            labels_adapted, batch_max_length=opt.batch_max_length
+        )
+
+        preds_adapted = model(images_adapted, labels_adpated_index[:, :-1])  # align with Attention.forward
+        target_adapted = labels_adpated_index[:, 1:]  # without [SOS] Symbol
+        loss_adapted = criterion(
+            preds_adapted.view(-1, preds_adapted.shape[-1]), target_adapted.contiguous().view(-1)
+        )
+
+        # """ loss of semi """
+        # # semi supervised part (SemiSL)
+        # images_unlabel, indexs_unlabel = next(iter(unlabel_loader_adapting))
+        # images_unlabel = images_unlabel.to(device)
+        # loss_SemiSL = criterion_SemiSL(images_unlabel, model)
+
+        """ loss of semi """
+        # semi supervised part (SemiSL)
+        images_unlabel, indexs_unlabel = next(iter(unlabel_loader_adapting))
+        images_unlabel = images_unlabel.to(device)
+        labels_adapting = [adapting_dict[index] for index in indexs_unlabel]
+        labels_adpating_index, _ = converter.encode(
+            labels_adapting, batch_max_length=opt.batch_max_length
+        )
+
+        preds_adapting = model(images_unlabel, labels_adpating_index[:, :-1])  # align with Attention.forward
+        target_adapting = labels_adpating_index[:, 1:]  # without [SOS] Symbol
+        loss_SemiSL = criterion(
+            preds_adapting.view(-1, preds_adapting.shape[-1]), target_adapting.contiguous().view(-1)
+        )
+
+        loss = loss_source + loss_adapted + loss_SemiSL
+        # loss = loss_source + loss_SemiSL
+        # semi_loss_avg.add(loss_SemiSL)
+
+        model.zero_grad()
+        loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(), opt.grad_clip
+        )  # gradient clipping with 5 (Default)
+        optimizer.step()
+        # train_loss_avg.add(loss)
+
+        if "super" in opt.schedule:
+            scheduler.step()
+        else:
+            adjust_learning_rate(optimizer, iteration, opt)
 
     """ Evaluation at the end of training """
     print("Start evaluation on benchmark testset")
@@ -645,11 +675,16 @@ if __name__ == "__main__":
         default="adaptation/remain.pkl", 
         help="path to remain data list"
     )
+    parser.add_argument(
+        "--checkpoint_path", 
+        default="", 
+        help="checkpoint"
+    )
     parser.add_argument("--batch_size_unlabel", type=int, default=2048, help="input batch size (unlabel data)")
     parser.add_argument("--data_size", type=int, default=2048000, help="total number of intermediate data")
-    parser.add_argument("--threshold", type=float, default=0.5, help="threshold of confidence score")
+    parser.add_argument("--threshold_above", type=float, default=0.7, help="threshold of confidence score")
+    parser.add_argument("--threshold_below", type=float, default=0.3, help="threshold of confidence score")
     parser.add_argument("--n_samples", type=int, default=20480, help="n samples of each adapt step")
-    parser.add_argument("--N_gradual", type=int, default=1000, help="N gradual step")
     parser.add_argument("--num_iter_GDA", type=int, default=300, help="number of iterations to train for each adaptation step")
 
 
