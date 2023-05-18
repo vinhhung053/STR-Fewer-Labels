@@ -160,7 +160,7 @@ def train(opt, log):
 
     # adaptation data
     # select_data_unlabel = ['U2.TextVQA', "U3.STVQA"]
-    select_data_unlabel = ["U1.Book32", "U2.TextVQA", "U3.STVQA"]
+    select_data_unlabel = ["U3.STVQA",  "U2.TextVQA", "U1.Book32"]
     unlabel_data = Gradual_Dataset(opt, opt.dataset_root_unlabel, select_data_unlabel, log)
 
     print("-" * 80)
@@ -237,7 +237,7 @@ def train(opt, log):
     """ select intermediate domain """
 
     print("-" * 80)
-    print("select intermediate domain")
+    print("Select intermediate domain")
 
     if (start_iter % opt.num_iter_GDA != 0):
 
